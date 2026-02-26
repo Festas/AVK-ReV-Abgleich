@@ -1,158 +1,285 @@
-from openpyxl import load_workbook  
+from openpyxl import load_workbook, Workbook
 from pathlib import Path, PureWindowsPath
 from time import sleep
-print("erstellt von Gregor Schuboth")
-sleep(1)
-pfad=str(PureWindowsPath(r"Z:\KKK\Fachbereiche\TKW\Allgemein\ReVS Arbeitsordner\12_ReVS-AVK-Abgleich"))
-revs=load_workbook(pfad+"/export.xlsx").active
-if pfad+"/AVK.xlsx"==True:
-    avk=load_workbook(pfad+"/AVK.xlsx").active
-elif pfad+"/Avk.xlsx"==True:
-    avk=load_workbook(pfad+"/Avk.xlsx").active
-else:
-    avk=load_workbook(pfad+"/avk.xlsx").active
-Abgleich=avk  
 
-spalteReVS=["",
-        "Verpackungs-ID",
-        "Standort",
-        "Reststoff-ID",
-        "Nettomasse/kg",
-        "AVK-Übersetzungsstandort"] 
-spalteAVK=["",
-        "Behälternummer",
-        "Lagerort/Absender",
-        "Abfallmasse [kg]",
-        "Individuelle ID"] #Position in AVK-Liste
-aufgenommenReVS=[]
-aufgenommenAVK=[]
-Ort=0 #ändert sich, wenn im AVK-Auszug KKK als Ort berücksichtigt wird
-#einlesen der gesuchten Spalten
+# Konstanten
+NETZWERKPFAD = str(PureWindowsPath(r"Z:\KKK\Fachbereiche\TKW\Allgemein\ReVS Arbeitsordner\12_ReVS-AVK-Abgleich"))
+REVS_DATEI = "export.xlsx"
+AVK_DATEINAMEN = ["AVK.xlsx", "Avk.xlsx", "avk.xlsx"]
+ABGLEICH_DATEI = "Abgleich.xlsx"
 
-h=[]
-for i in range(1,avk.max_column+1):
-        h.append(avk.cell(1,i).value)
-for i in range(1,len(spalteAVK)):
-    spalteAVK[i]=h.index(spalteAVK[i])+1  
-h=[]
-for i in range(1,revs.max_column+1):
-    h.append(revs.cell(1,i).value)
-Abgleich.active.delete_cols(1,Abgleich.active.max_column)
-for i in range(1,len(spalteReVS)-1):
-    spalteReVS[i]=h.index(spalteReVS[i])+1 
+SPALTEN_REVS = ["Verpackungs-ID", "Standort", "Reststoff-ID", "Nettomasse/kg"]
+SPALTEN_AVK = ["Behälternummer", "Lagerort/Absender", "Abfallmasse [kg]", "Individuelle ID"]
+FEHLER_HEADER = [
+    "Verpackungs-ID", "Reststoff-ID", "Individuelle ID",
+    "Standort ReVS", "Standort AVK",
+    "ReVS Nettomasse/kg", "AVK Abfallmasse [kg]",
+]
 
-restrevs=[]
-for i in range(len(spalteReVS)):
-    restrevs.append("")
-restavk=[]
-for i in range(len(spalteAVK)):
-    restavk.append("")
+ORT_KKK = "KKK"
+STANDORT_AN_AVK = "An AVK übergeben"
+STANDORT_ZW6 = "ZW6-1"
+STANDORT_CONTAINER = "Containerstellplatz-ÜB"
+CONTAINER_BEZEICHNUNG = 'CONTAINER 20"'
+GEBINDETYP_DREISTELLIG = ("V", "E")
+GEBINDETYP_DREISTELLIG_ZWEI = ("MH", "SO", "AK", "KE")
 
-GebindeReVS=[]
-GebindeReVS.append(spalteReVS.copy())
-GebindeAVK=[]
-GebindeAVK.append(spalteAVK.copy())
 
-Fehler=[["Verpackungs-ID","Reststoff-ID","Individuelle ID","Standort ReVS","Standort AVK", "ReVS Nettomasse/kg", "AVK Abfallmasse [kg]"]]
+def lade_dateien(pfad):
+    """Lädt ReVS- und AVK-Workbooks aus dem angegebenen Pfad."""
+    revs_pfad = Path(pfad, REVS_DATEI)
+    if not revs_pfad.exists():
+        raise FileNotFoundError(f"ReVS-Datei nicht gefunden: {revs_pfad}")
+    revs = load_workbook(str(revs_pfad)).active
 
-for i in range(1,avk.max_row+1):      #AVK einlesen    
-    GebindeAVK.append(restavk.copy())
-    if avk.cell(i,spalteAVK[1]).value!="":
-        GebindeAVK[i][0]=avk.cell(i,spalteAVK[1]).value[0:avk.cell(i,spalteAVK[1]).value.find(" ")]
-        if avk.cell(i,spalteAVK[1]).value.count("*")!=0:
-            GebindeAVK[i][1]=avk.cell(i,spalteAVK[1]).value[0:avk.cell(i,spalteAVK[1]).value.find("*")]
-        elif avk.cell(i,spalteAVK[1]).value[0:3]=="KKK":
-            GebindeAVK[i][0]=avk.cell(i,spalteAVK[1]).value[0:3]
-            GebindeAVK[i][1]=avk.cell(i,spalteAVK[1]).value
+    avk_sheet = None
+    for dateiname in AVK_DATEINAMEN:
+        avk_pfad = Path(pfad, dateiname)
+        if avk_pfad.exists():
+            avk_sheet = load_workbook(str(avk_pfad)).active
+            break
+    if avk_sheet is None:
+        raise FileNotFoundError(f"AVK-Datei nicht gefunden in: {pfad}")
+
+    return revs, avk_sheet
+
+
+def lese_spalten_indizes(sheet, spalten_namen):
+    """Ermittelt die Spaltenindizes für die angegebenen Spaltennamen aus dem Header."""
+    header = [sheet.cell(1, col).value for col in range(1, sheet.max_column + 1)]
+    indizes = {}
+    for name in spalten_namen:
+        if name not in header:
+            raise ValueError(
+                f"Spalte '{name}' nicht im Header gefunden. Verfügbare Spalten: {header}"
+            )
+        indizes[name] = header.index(name) + 1
+    return indizes
+
+
+def _berechne_avk_standort(standort):
+    """Berechnet den AVK-Übersetzungsstandort aus dem ReVS-Standort."""
+    if not standort:
+        return ""
+    if standort[0:2] == "EX":
+        return ORT_KKK
+    if standort == STANDORT_ZW6:
+        return "W 06"
+    if standort == STANDORT_CONTAINER:
+        return CONTAINER_BEZEICHNUNG
+    if standort[0:2] in ("A-", "AL", "ST") or standort[0:1] == "E":
+        z_pos = standort.find("Z")
+        if z_pos == -1:
+            return standort
+        return standort[z_pos + 1: z_pos + 2] + " " + standort[z_pos + 2: z_pos + 7]
+    return ""
+
+
+def vergleiche_gebinde(revs, avk, idx_revs, idx_avk):
+    """Führt den Abgleich der Gebinde zwischen ReVS und AVK durch."""
+    aufgenommen_avk = set()
+    aufgenommen_revs = set()
+    ort_kkk_vorhanden = False
+
+    # AVK-Gebinde einlesen
+    gebinde_avk = []
+    for zeile in range(1, avk.max_row + 1):
+        zellwert = avk.cell(zeile, idx_avk["Behälternummer"]).value
+        if zellwert is None or zellwert == "":
+            continue
+        zellwert_str = str(zellwert)
+
+        leerzeichen_pos = zellwert_str.find(" ")
+        gebinde_typ = zellwert_str[0:leerzeichen_pos] if leerzeichen_pos != -1 else zellwert_str
+
+        stern_pos = zellwert_str.find("*")
+        if stern_pos != -1:
+            gebinde_nummer = zellwert_str[0:stern_pos]
+        elif zellwert_str[0:3] == ORT_KKK:
+            gebinde_typ = ORT_KKK
+            gebinde_nummer = zellwert_str
         else:
-            GebindeAVK[i][1]=avk.cell(i,spalteAVK[1]).value
-        if aufgenommenAVK.count(GebindeAVK[i][0])==0 and GebindeAVK[i][0]!="":
-            aufgenommenAVK.append(GebindeAVK[i][0])
-        GebindeAVK[i][2]=avk.cell(i,spalteAVK[2]).value
-        GebindeAVK[i][3]=avk.cell(i,spalteAVK[3]).value
-        GebindeAVK[i][4]=avk.cell(i,spalteAVK[4]).value
-        if GebindeAVK[i][2]=="KKK":
-            Ort=1
+            gebinde_nummer = zellwert_str
 
-for i in range(1,revs.max_row+1):  #ReVS einlesen
-        GebindeReVS.append(restrevs.copy())
-        if revs.cell(i,spalteReVS[1]).value!="":
-            GebindeReVS[i][0]=revs.cell(i,spalteReVS[1]).value[0:revs.cell(i,spalteReVS[1]).value.find("-")] #Gebindetyp
-        GebindeReVS[i][2]=revs.cell(i,spalteReVS[2]).value
-        if aufgenommenAVK.count(GebindeReVS[i][0])!=0:      
-            if GebindeReVS[i][0][0:1]=="V" or GebindeReVS[i][0][0:2]=="MH" or GebindeReVS[i][0][0:2]=="SO" or GebindeReVS[i][0][0:1]=="E" or GebindeReVS[i][0][0:2]=="AK" or GebindeReVS[i][0][0:2]=="KE": #Unterscheidung, da AVK keine einheitliche Bezeichnung hat
-                GebindeReVS[i][1]=GebindeReVS[i][0]+" "+revs.cell(i,spalteReVS[1]).value[revs.cell(i,spalteReVS[1]).value.find("-")+2:revs.cell(i,spalteReVS[1]).value.find("-")+5] #dreistellige Nummern
-            elif GebindeReVS[i][0][0:4]=="KKK":
-                GebindeReVS[i][1]=GebindeReVS[i][1]
+        lagerort = avk.cell(zeile, idx_avk["Lagerort/Absender"]).value
+        lagerort = lagerort if lagerort is not None else ""
+        masse = avk.cell(zeile, idx_avk["Abfallmasse [kg]"]).value
+        masse = masse if masse is not None else ""
+        ind_id = avk.cell(zeile, idx_avk["Individuelle ID"]).value
+        ind_id = ind_id if ind_id is not None else ""
+
+        if gebinde_typ:
+            aufgenommen_avk.add(gebinde_typ)
+        if str(lagerort) == ORT_KKK:
+            ort_kkk_vorhanden = True
+
+        gebinde_avk.append({
+            "typ": gebinde_typ,
+            "nummer": gebinde_nummer,
+            "lagerort": lagerort,
+            "masse": masse,
+            "ind_id": ind_id,
+            "vorhanden": False,
+        })
+
+    # ReVS-Gebinde einlesen
+    gebinde_revs = []
+    for zeile in range(1, revs.max_row + 1):
+        verpackungs_id = revs.cell(zeile, idx_revs["Verpackungs-ID"]).value
+        if verpackungs_id is None or verpackungs_id == "":
+            continue
+        verpackungs_id_str = str(verpackungs_id)
+
+        minus_pos = verpackungs_id_str.find("-")
+        gebinde_typ = verpackungs_id_str[0:minus_pos] if minus_pos != -1 else verpackungs_id_str
+
+        if gebinde_typ not in aufgenommen_avk:
+            continue
+
+        # Gebindenummer bestimmen
+        if minus_pos != -1:
+            if gebinde_typ[0:1] in GEBINDETYP_DREISTELLIG or gebinde_typ[0:2] in GEBINDETYP_DREISTELLIG_ZWEI:
+                gebinde_nummer = gebinde_typ + " " + verpackungs_id_str[minus_pos + 2: minus_pos + 5]
+            elif gebinde_typ[0:3] == ORT_KKK:
+                gebinde_nummer = ""
             else:
-                GebindeReVS[i][1]=GebindeReVS[i][0]+" "+revs.cell(i,spalteReVS[1]).value[revs.cell(i,spalteReVS[1]).value.find("-")+1:revs.cell(i,spalteReVS[1]).value.find("-")+7] #vierstellige Nummern
-            if aufgenommenReVS.count(GebindeReVS[i][0])==0 and GebindeReVS[i][0]!="":
-                aufgenommenReVS.append(GebindeReVS[i][0])
-            GebindeReVS[i][3]=revs.cell(i,spalteReVS[3]).value
-            GebindeReVS[i][4]=revs.cell(i,spalteReVS[4]).value
-            if GebindeReVS[i][2][0:2]=="EX":
-                GebindeReVS[i][5]="KKK"
-            elif GebindeReVS[i][2]=="ZW6-1":
-                GebindeReVS[i][5]="W 06"
-            elif  GebindeReVS[i][2][0:2]=="A-" or GebindeReVS[i][2][0:2]=="AL" or GebindeReVS[i][2][0:1]=="E" or GebindeReVS[i][2][0:2]=="ST":
-                GebindeReVS[i][5]=revs.cell(i,spalteReVS[2]).value[revs.cell(i,spalteReVS[2]).value.find("Z")+1:revs.cell(i,spalteReVS[2]).value.find("Z")+2]+ " "+revs.cell(i,spalteReVS[2]).value[revs.cell(i,spalteReVS[2]).value.find("Z")+2:revs.cell(i,spalteReVS[2]).value.find("Z")+7]  
-            elif GebindeReVS[i][2]=="Containerstellplatz-ÜB":
-                GebindeReVS[i][5]='CONTAINER 20"'
-            for j in range(1,len(GebindeAVK)):
-                if GebindeAVK[j][0]!="vorhanden": #überspringen gleicher Gebinde
-                    if GebindeReVS[i][1]==GebindeAVK[j][1]:
-                        GebindeReVS[i][0]="vorhanden"
-                        GebindeAVK[j][0]="vorhanden"
-                        Fehler.append(Fehler[0].copy())
-                        x=0
-                        Fehler[-1][0]=GebindeReVS[i][1]
-                        Fehler[-1][1]=GebindeReVS[i][3]
-                        Fehler[-1][2]=GebindeAVK[j][4]
-                        Fehler[-1][3]=GebindeReVS[i][2]
-                        Fehler[-1][4]=GebindeAVK[j][2]
-                        Fehler[-1][5]=GebindeReVS[i][4]
-                        Fehler[-1][6]=GebindeAVK[j][3]
-                        if Fehler[-1][1]==Fehler[-1][2]:
-                            Fehler[-1][2]="stimmt mit ReVS"
-                        else:
-                            x+=1
-                        if GebindeReVS[i][5]==GebindeAVK[j][2]:
-                            Fehler[-1][4]="stimmt mit ReVS"
-                        else:
-                            x+=1
-                        if Fehler[-1][5]==Fehler[-1][6]:
-                            Fehler[-1][6]="stimmt mit ReVS"
-                        else:
-                            x+=1
-                        if x==0:
-                            del Fehler[-1]                               
-            if aufgenommenAVK.count(GebindeReVS[i][0])!=0 and (GebindeReVS[i][5]!="KKK" and Ort==0) and GebindeReVS[i][2]!="An AVK übergeben" :
-                Fehler.append(Fehler[0].copy())
-                Fehler[x][0]=GebindeReVS[i][1]
-                Fehler[x][1]=GebindeReVS[i][3]
-                Fehler[x][2]=""
-                Fehler[x][3]=GebindeReVS[i][2]
-                Fehler[x][4]="nicht im AVK gelistet"
-                Fehler[x][5]=GebindeReVS[i][4]
-                Fehler[x][6]=""
+                gebinde_nummer = gebinde_typ + " " + verpackungs_id_str[minus_pos + 1: minus_pos + 7]
+        else:
+            gebinde_nummer = gebinde_typ
 
-        
-                
-for i in range(1,len(GebindeAVK)):  #geht alle Gebinde im AVK durch
-    if  GebindeAVK[i][0]!="vorhanden" and aufgenommenReVS.count(GebindeAVK[i][0])!=0:      #überspringen gleicher Gebinde
-        x=x+1
-        Fehler.append(Fehler[0].copy())
-        Fehler[x][0]=GebindeAVK[i][1]
-        Fehler[x][1]="nicht im ReVS gelistet"
-        Fehler[x][2]=GebindeAVK[i][4]
-        Fehler[x][3]=""
-        Fehler[x][4]=GebindeAVK[i][2]
-        Fehler[x][5]=""
-        Fehler[x][6]=GebindeAVK[i][3]
-Abgleich.active.cell(1,1).value="Fehlerhafte und fehlende Gebinde"
-for i in range(1,len(Fehler)+1):
-    for j in range(1,len(Fehler[i-1])+1):
-        Abgleich.active.cell(i+1,j).value=Fehler[i-1][j-1]
-Abgleich.save(pfad+"/Abgleich.xlsx")
-#Abgleich.save("Desktop/Abgleich.xlsx")
-Abgleich.close()
+        standort = revs.cell(zeile, idx_revs["Standort"]).value
+        standort = str(standort) if standort is not None else ""
+        reststoff_id = revs.cell(zeile, idx_revs["Reststoff-ID"]).value
+        reststoff_id = reststoff_id if reststoff_id is not None else ""
+        nettomasse = revs.cell(zeile, idx_revs["Nettomasse/kg"]).value
+        nettomasse = nettomasse if nettomasse is not None else ""
+
+        if gebinde_typ:
+            aufgenommen_revs.add(gebinde_typ)
+
+        avk_standort = _berechne_avk_standort(standort)
+
+        gebinde_revs.append({
+            "typ": gebinde_typ,
+            "nummer": gebinde_nummer,
+            "standort": standort,
+            "reststoff_id": reststoff_id,
+            "nettomasse": nettomasse,
+            "avk_standort": avk_standort,
+            "vorhanden": False,
+        })
+
+    # Abgleich durchführen
+    fehler = []
+    for revs_eintrag in gebinde_revs:
+        for avk_eintrag in gebinde_avk:
+            if avk_eintrag["vorhanden"]:
+                continue
+            if revs_eintrag["nummer"] == avk_eintrag["nummer"]:
+                revs_eintrag["vorhanden"] = True
+                avk_eintrag["vorhanden"] = True
+
+                abweichungen = 0
+                ind_id_out = avk_eintrag["ind_id"]
+                standort_avk_out = avk_eintrag["lagerort"]
+                masse_avk_out = avk_eintrag["masse"]
+
+                if str(revs_eintrag["reststoff_id"]) == str(avk_eintrag["ind_id"]):
+                    ind_id_out = "stimmt mit ReVS"
+                else:
+                    abweichungen += 1
+
+                if revs_eintrag["avk_standort"] == str(avk_eintrag["lagerort"]):
+                    standort_avk_out = "stimmt mit ReVS"
+                else:
+                    abweichungen += 1
+
+                if str(revs_eintrag["nettomasse"]) == str(avk_eintrag["masse"]):
+                    masse_avk_out = "stimmt mit ReVS"
+                else:
+                    abweichungen += 1
+
+                if abweichungen > 0:
+                    fehler.append([
+                        revs_eintrag["nummer"],
+                        revs_eintrag["reststoff_id"],
+                        ind_id_out,
+                        revs_eintrag["standort"],
+                        standort_avk_out,
+                        revs_eintrag["nettomasse"],
+                        masse_avk_out,
+                    ])
+                break
+
+        # ReVS-Gebinde nicht im AVK gefunden
+        # KKK-Gebinde nur melden, wenn KKK auch im AVK-Auszug enthalten ist
+        if (
+            not revs_eintrag["vorhanden"]
+            and revs_eintrag["typ"] in aufgenommen_avk
+            and not (revs_eintrag["avk_standort"] == ORT_KKK and not ort_kkk_vorhanden)
+            and revs_eintrag["standort"] != STANDORT_AN_AVK
+        ):
+            fehler.append([
+                revs_eintrag["nummer"],
+                revs_eintrag["reststoff_id"],
+                "",
+                revs_eintrag["standort"],
+                "nicht im AVK gelistet",
+                revs_eintrag["nettomasse"],
+                "",
+            ])
+
+    # AVK-Gebinde nicht im ReVS gefunden
+    for avk_eintrag in gebinde_avk:
+        if not avk_eintrag["vorhanden"] and avk_eintrag["typ"] in aufgenommen_revs:
+            fehler.append([
+                avk_eintrag["nummer"],
+                "nicht im ReVS gelistet",
+                avk_eintrag["ind_id"],
+                "",
+                avk_eintrag["lagerort"],
+                "",
+                avk_eintrag["masse"],
+            ])
+
+    return fehler
+
+
+def schreibe_ergebnis(pfad, fehler):
+    """Schreibt die Fehlerliste in eine neue Excel-Datei."""
+    ergebnis = Workbook()
+    ws = ergebnis.active
+    ws.cell(1, 1).value = "Fehlerhafte und fehlende Gebinde"
+    ws.append(FEHLER_HEADER)
+    for zeile in fehler:
+        ws.append(zeile)
+    ausgabe_pfad = str(Path(pfad, ABGLEICH_DATEI))
+    ergebnis.save(ausgabe_pfad)
+    ergebnis.close()
+
+
+def main():
+    print("erstellt von Gregor Schuboth")
+    sleep(1)
+    pfad = NETZWERKPFAD
+
+    try:
+        revs, avk = lade_dateien(pfad)
+    except FileNotFoundError as e:
+        print(f"Fehler beim Laden der Dateien: {e}")
+        return
+
+    try:
+        idx_revs = lese_spalten_indizes(revs, SPALTEN_REVS)
+        idx_avk = lese_spalten_indizes(avk, SPALTEN_AVK)
+    except ValueError as e:
+        print(f"Fehler beim Einlesen der Spalten: {e}")
+        return
+
+    fehler = vergleiche_gebinde(revs, avk, idx_revs, idx_avk)
+    schreibe_ergebnis(pfad, fehler)
+    print(f"Abgleich abgeschlossen. {len(fehler)} Abweichungen gefunden.")
+
+
+if __name__ == "__main__":
+    main()
